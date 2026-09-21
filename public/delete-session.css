@@ -1,8 +1,12 @@
 .session-card { position: relative; padding: 0; overflow: hidden; }
 .session-open { display: block; width: 100%; border: 0; background: transparent; padding: 22px; text-align: left; color: inherit; }
 .session-open > div:first-child { display: flex; justify-content: space-between; align-items: center; }
-.session-delete { position: absolute; right: 16px; bottom: 14px; border: 0; border-radius: 6px; background: #fff; color: #a23d38; padding: 5px 8px; font-size: 13px; font-weight: 650; }
-.session-open .card-bottom { padding-right: 86px; }
+.session-card-actions { position: absolute; right: 16px; bottom: 14px; display: flex; gap: 4px; }
+.session-delete, .session-duplicate { border: 0; border-radius: 6px; background: #fff; padding: 5px 8px; font-size: 13px; font-weight: 650; }
+.session-delete { color: #a23d38; }
+.session-duplicate { color: #4940d5; }
+.session-open .card-bottom { padding-right: 166px; }
 .session-delete:hover { background: #fff0ef; }
+.session-duplicate:hover { background: #f0efff; }
 .danger { background: #b2443e; color: #fff; }
 .danger:hover { background: #963833; }

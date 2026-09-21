@@ -136,6 +136,40 @@ async function state(db, code, owner, participantId, now) {
   };
 }
 
+async function displayState(db, code, now) {
+  const currentSession = await session(db, code, now);
+  const [questionsResult, participantsResult, countsResult] = await db.batch([
+    db.prepare('SELECT * FROM questions WHERE code=? AND started IS NOT NULL ORDER BY position').bind(code),
+    db.prepare('SELECT count(*) AS n FROM participants WHERE code=?').bind(code),
+    db.prepare('SELECT a.question, a.choice, count(*) AS count FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=? GROUP BY a.question,a.choice').bind(code)
+  ]);
+  const counts = countsResult.results;
+  return {
+    code: currentSession.code,
+    title: currentSession.title,
+    ended: Boolean(currentSession.ended),
+    display: true,
+    serverNow: now,
+    participants: Number(participantsResult.results[0]?.n || 0),
+    questions: questionsResult.results.map(question => {
+      const closed = question.closed !== null;
+      return {
+        id: question.id,
+        title: question.title,
+        options: JSON.parse(question.options),
+        seconds: Number(question.seconds),
+        position: Number(question.position),
+        started: question.started,
+        deadline: Number(question.started) + Number(question.seconds) * 1000,
+        closed: question.closed,
+        correct: closed ? Number(question.correct) : undefined,
+        received: counts.filter(row => row.question === question.id).reduce((sum, row) => sum + Number(row.count), 0),
+        result: closed ? resultFor(question, counts) : undefined
+      };
+    })
+  };
+}
+
 async function parseBody(request) {
   const text = await request.text();
   requireValue(text.length <= 8_000_000, 'Archivo demasiado grande (máximo 5 MB).', 413);
@@ -226,6 +260,10 @@ async function handleApi(request, env) {
   const [, code, action = ''] = route;
   const participantId = cookies[`pulso_${code}`];
 
+  if (action === 'display' && request.method === 'GET') {
+    return apiResponse(await displayState(env.DB, code, now));
+  }
+
   if (action === 'join' && request.method === 'POST') {
     const currentSession = await session(env.DB, code, now);
     requireValue(!currentSession.ended, 'La sesión ya ha finalizado.');
@@ -264,6 +302,29 @@ async function handleApi(request, env) {
   }
 
   const currentSession = await owned(env.DB, code, owner, now);
+
+  if (action === 'duplicate' && request.method === 'POST') {
+    const questions = await all(env.DB, 'SELECT position,title,options,correct,seconds FROM questions WHERE code=? ORDER BY position', code);
+    let copyCode;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const random = new Uint32Array(1);
+      crypto.getRandomValues(random);
+      copyCode = String(random[0] % 900000 + 100000);
+      if (!await first(env.DB, 'SELECT code FROM sessions WHERE code=?', copyCode)) break;
+      copyCode = null;
+    }
+    requireValue(copyCode, 'No se ha podido generar un código para la copia. Inténtalo de nuevo.', 503);
+    const copyTitle = `Copia de ${currentSession.title}`.slice(0, 120);
+    const statements = [env.DB.prepare('INSERT INTO sessions(code,owner,title,created) VALUES(?,?,?,?)').bind(copyCode, owner, copyTitle, now)];
+    for (let start = 0; start < questions.length; start += 14) {
+      const chunk = questions.slice(start, start + 14);
+      const placeholders = chunk.map(() => '(?,?,?,?,?,?,?)').join(',');
+      const params = chunk.flatMap(question => [token(), copyCode, Number(question.position), question.title, question.options, Number(question.correct), Number(question.seconds)]);
+      statements.push(env.DB.prepare(`INSERT INTO questions(id,code,position,title,options,correct,seconds) VALUES ${placeholders}`).bind(...params));
+    }
+    await env.DB.batch(statements);
+    return apiResponse({code: copyCode, title: copyTitle}, 201);
+  }
 
   if (action === 'export' && request.method === 'GET') {
     const [questionResults, participantResults, answerResults] = await env.DB.batch([

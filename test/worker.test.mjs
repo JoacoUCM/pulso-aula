@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { handleRequest } from '../src/worker.mjs';
 import { importQuestions, parseTable } from '../lib/import.mjs';
 import { readWorkbook, workbook } from '../lib/excel.mjs';
+import { qrSvg } from '../public/qr.js';
 
 class D1StatementMock {
   constructor(database, sql, params = []) {
@@ -90,6 +91,13 @@ test('Importa tablas y genera libros XLSX válidos', () => {
   assert.deepEqual(readWorkbook(file)[0][1], ['<seguro>', '=NO_ES_FORMULA()']);
 });
 
+test('Genera un QR local para el enlace de alumno', () => {
+  const svg = qrSvg('https://pulso-aula.jpanera.workers.dev/alumno?codigo=123456');
+  assert.match(svg, /viewBox="0 0 45 45"/);
+  assert.match(svg, /Código QR para entrar como alumno/);
+  assert.ok(svg.length > 3000);
+});
+
 test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borrado', async () => {
   const db = new D1Mock();
   const env = {
@@ -108,22 +116,44 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     await student(endpoint('join'), {name: 'Alumna A'});
     await stranger(endpoint(), undefined, 401);
     await stranger(endpoint('start'), {id: questionId}, 403);
+    state = await stranger(endpoint('display'));
+    assert.equal(state.questions.length, 0);
     await teacher(endpoint('start'), {id: questionId});
     state = await student(endpoint());
     assert.equal(state.questions[0].correct, undefined);
+    state = await stranger(endpoint('display'));
+    assert.equal(state.questions[0].correct, undefined);
+    assert.equal(state.questions[0].result, undefined);
     await student(endpoint('answer'), {question: questionId, choice: 1});
     await student(endpoint('answer'), {question: questionId, choice: 0}, 409);
+    state = await stranger(endpoint('display'));
+    assert.equal(state.questions[0].received, 1);
     await teacher(endpoint('close'), {id: questionId});
     state = await student(endpoint());
     assert.equal(state.questions[0].result.correctPercent, 100);
     assert.equal(state.questions[0].correct, 1);
+    state = await stranger(endpoint('display'));
+    assert.equal(state.questions[0].correct, 1);
+    assert.equal(state.questions[0].result.correctPercent, 100);
     const exported = await teacher(endpoint('export'), undefined, 200, true);
     const sheets = readWorkbook(exported);
     assert.equal(sheets.length, 3);
     assert.equal(sheets[0].find(row => row[0] === 'Aciertos')[1], '1');
+    await stranger(endpoint('duplicate'), {}, 403);
+    const copy = await teacher(endpoint('duplicate'), {}, 201);
+    assert.notEqual(copy.code, code);
+    state = await teacher(`/api/sessions/${copy.code}`);
+    assert.equal(state.title, 'Copia de Arqueología docente');
+    assert.equal(state.questions.length, 1);
+    assert.equal(state.questions[0].started, null);
+    assert.equal(state.questions[0].closed, null);
+    assert.equal(state.participants, 0);
+    assert.equal((await teacher('/api/bootstrap')).sessions.length, 2);
     await teacher(endpoint('delete'), {});
-    assert.equal((await teacher('/api/bootstrap')).sessions.length, 0);
+    assert.equal((await teacher('/api/bootstrap')).sessions.length, 1);
     await teacher(endpoint(), undefined, 404);
+    await teacher(`/api/sessions/${copy.code}/delete`, {});
+    assert.equal((await teacher('/api/bootstrap')).sessions.length, 0);
   } finally {
     db.close();
   }
