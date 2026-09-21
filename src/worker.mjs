@@ -1,6 +1,6 @@
-import { Buffer } from 'node:buffer';
-import { workbook, readWorkbook } from '../lib/excel.mjs';
-import { importQuestions, parseTable } from '../lib/import.mjs';
+import {Buffer} from 'node:buffer';
+import {workbook, readWorkbook} from '../lib/excel.mjs';
+import {importQuestions, parseTable} from '../lib/import.mjs';
 
 const securityHeaders = {
   'Cache-Control': 'no-store',
@@ -26,16 +26,17 @@ const token = () => {
   return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
 };
 
-const parseCookies = request => Object.fromEntries(
-  (request.headers.get('Cookie') || '')
-    .split(';')
-    .map(value => value.trim())
-    .filter(Boolean)
-    .map(value => {
-      const separator = value.indexOf('=');
-      return separator < 0 ? [value, ''] : [value.slice(0, separator), value.slice(separator + 1)];
-    })
-);
+const parseCookies = request =>
+  Object.fromEntries(
+    (request.headers.get('Cookie') || '')
+      .split(';')
+      .map(value => value.trim())
+      .filter(Boolean)
+      .map(value => {
+        const separator = value.indexOf('=');
+        return separator < 0 ? [value, ''] : [value.slice(0, separator), value.slice(separator + 1)];
+      })
+  );
 
 const apiResponse = (data, status = 200, headers = {}) => {
   const responseHeaders = new Headers({...securityHeaders, ...headers});
@@ -49,16 +50,34 @@ const addCookie = (response, name, value, secure = true) => {
   return response;
 };
 
-const first = async (db, sql, ...params) => db.prepare(sql).bind(...params).first();
-const all = async (db, sql, ...params) => (await db.prepare(sql).bind(...params).all()).results;
-const run = async (db, sql, ...params) => db.prepare(sql).bind(...params).run();
+const first = async (db, sql, ...params) =>
+  db
+    .prepare(sql)
+    .bind(...params)
+    .first();
+const all = async (db, sql, ...params) =>
+  (
+    await db
+      .prepare(sql)
+      .bind(...params)
+      .all()
+  ).results;
+const run = async (db, sql, ...params) =>
+  db
+    .prepare(sql)
+    .bind(...params)
+    .run();
 
 function validateQuestion(question) {
   requireValue(question && typeof question.title === 'string' && question.title.trim().length > 0 && question.title.length <= 2000, 'Escribe una pregunta (máximo 2000 caracteres).');
   requireValue(Array.isArray(question.options) && question.options.length >= 2 && question.options.length <= 8 && question.options.every(option => typeof option === 'string' && option.trim() && option.length <= 1000), 'Introduce entre 2 y 8 opciones.');
   requireValue(Number.isInteger(question.correct) && question.correct >= 0 && question.correct < question.options.length, 'Marca una respuesta correcta.');
   requireValue(Number.isInteger(question.seconds) && question.seconds >= 5 && question.seconds <= 3600, 'El tiempo debe estar entre 5 y 3600 segundos.');
-  return {...question, title: question.title.trim(), options: question.options.map(option => option.trim())};
+  return {
+    ...question,
+    title: question.title.trim(),
+    options: question.options.map(option => option.trim())
+  };
 }
 
 function resultFor(question, answerRows) {
@@ -68,10 +87,10 @@ function resultFor(question, answerRows) {
   return {
     counts,
     total,
-    percentages: counts.map(value => total ? 100 * value / total : 0),
+    percentages: counts.map(value => (total ? (100 * value) / total : 0)),
     correctCount: counts[question.correct],
-    correctPercent: total ? 100 * counts[question.correct] / total : 0,
-    errorPercent: total ? 100 * (total - counts[question.correct]) / total : 0
+    correctPercent: total ? (100 * counts[question.correct]) / total : 0,
+    errorPercent: total ? (100 * (total - counts[question.correct])) / total : 0
   };
 }
 
@@ -94,13 +113,7 @@ async function owned(db, code, owner, now) {
 
 async function state(db, code, owner, participantId, now) {
   const currentSession = await session(db, code, now);
-  const statements = [
-    db.prepare('SELECT * FROM participants WHERE id=? AND code=?').bind(participantId || '', code),
-    db.prepare('SELECT * FROM questions WHERE code=? ORDER BY position').bind(code),
-    db.prepare('SELECT count(*) AS n FROM participants WHERE code=?').bind(code),
-    db.prepare('SELECT a.question, a.choice, count(*) AS count FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=? GROUP BY a.question,a.choice').bind(code),
-    db.prepare('SELECT a.question,a.choice FROM answers a JOIN questions q ON q.id=a.question WHERE a.participant=? AND q.code=?').bind(participantId || '', code)
-  ];
+  const statements = [db.prepare('SELECT * FROM participants WHERE id=? AND code=?').bind(participantId || '', code), db.prepare('SELECT * FROM questions WHERE code=? ORDER BY position').bind(code), db.prepare('SELECT count(*) AS n FROM participants WHERE code=?').bind(code), db.prepare('SELECT a.question, a.choice, count(*) AS count FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=? GROUP BY a.question,a.choice').bind(code), db.prepare('SELECT a.question,a.choice FROM answers a JOIN questions q ON q.id=a.question WHERE a.participant=? AND q.code=?').bind(participantId || '', code)];
   const [participantResult, questionsResult, participantsResult, countsResult, choicesResult] = await db.batch(statements);
   const participant = participantResult.results[0] || null;
   const teacher = currentSession.owner === owner;
@@ -118,6 +131,7 @@ async function state(db, code, owner, participantId, now) {
     participants: Number(participantsResult.results[0]?.n || 0),
     questions: questions.map(question => {
       const closed = question.closed !== null;
+      const revealed = Boolean(question.revealed);
       return {
         id: question.id,
         title: question.title,
@@ -127,32 +141,31 @@ async function state(db, code, owner, participantId, now) {
         started: question.started,
         deadline: question.started === null ? null : Number(question.started) + Number(question.seconds) * 1000,
         closed: question.closed,
-        correct: teacher || closed ? Number(question.correct) : undefined,
+        revealed,
+        correct: teacher || revealed ? Number(question.correct) : undefined,
         answer: participantChoices.has(question.id) ? participantChoices.get(question.id) : undefined,
-        received: teacher || closed ? countsResult.results.filter(row => row.question === question.id).reduce((sum, row) => sum + Number(row.count), 0) : undefined,
-        result: closed ? resultFor(question, countsResult.results) : undefined
+        received: teacher || revealed ? countsResult.results.filter(row => row.question === question.id).reduce((sum, row) => sum + Number(row.count), 0) : undefined,
+        result: (teacher && closed) || revealed ? resultFor(question, countsResult.results) : undefined
       };
     })
   };
 }
 
-async function displayState(db, code, now) {
+async function displayState(db, code, owner, now) {
   const currentSession = await session(db, code, now);
-  const [questionsResult, participantsResult, countsResult] = await db.batch([
-    db.prepare('SELECT * FROM questions WHERE code=? AND started IS NOT NULL ORDER BY position').bind(code),
-    db.prepare('SELECT count(*) AS n FROM participants WHERE code=?').bind(code),
-    db.prepare('SELECT a.question, a.choice, count(*) AS count FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=? GROUP BY a.question,a.choice').bind(code)
-  ]);
+  const teacher = Boolean(owner && currentSession.owner === owner);
+  const [questionsResult, participantsResult, countsResult] = await db.batch([db.prepare(`SELECT * FROM questions WHERE code=?${teacher ? '' : ' AND started IS NOT NULL'} ORDER BY position`).bind(code), db.prepare('SELECT count(*) AS n FROM participants WHERE code=?').bind(code), db.prepare('SELECT a.question, a.choice, count(*) AS count FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=? GROUP BY a.question,a.choice').bind(code)]);
   const counts = countsResult.results;
   return {
     code: currentSession.code,
     title: currentSession.title,
     ended: Boolean(currentSession.ended),
     display: true,
+    teacher,
     serverNow: now,
     participants: Number(participantsResult.results[0]?.n || 0),
     questions: questionsResult.results.map(question => {
-      const closed = question.closed !== null;
+      const revealed = Boolean(question.revealed);
       return {
         id: question.id,
         title: question.title,
@@ -160,11 +173,12 @@ async function displayState(db, code, now) {
         seconds: Number(question.seconds),
         position: Number(question.position),
         started: question.started,
-        deadline: Number(question.started) + Number(question.seconds) * 1000,
+        deadline: question.started === null ? null : Number(question.started) + Number(question.seconds) * 1000,
         closed: question.closed,
-        correct: closed ? Number(question.correct) : undefined,
+        revealed,
+        correct: revealed ? Number(question.correct) : undefined,
         received: counts.filter(row => row.question === question.id).reduce((sum, row) => sum + Number(row.count), 0),
-        result: closed ? resultFor(question, counts) : undefined
+        result: revealed ? resultFor(question, counts) : undefined
       };
     })
   };
@@ -212,8 +226,8 @@ async function handleApi(request, env) {
     for (let attempt = 0; attempt < 20; attempt++) {
       const random = new Uint32Array(1);
       crypto.getRandomValues(random);
-      code = String(random[0] % 900000 + 100000);
-      if (!await first(env.DB, 'SELECT code FROM sessions WHERE code=?', code)) break;
+      code = String((random[0] % 900000) + 100000);
+      if (!(await first(env.DB, 'SELECT code FROM sessions WHERE code=?', code))) break;
       code = null;
     }
     requireValue(code, 'No se ha podido generar un código. Inténtalo de nuevo.', 503);
@@ -243,12 +257,17 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === '/api/template' && request.method === 'GET') {
-    const file = workbook([{name: 'Plantilla', rows: [
-      ['Question:', '', '', '¿Qué es el registro arqueológico?'],
-      ['Choices:', '', '', '1. Solo restos líticos\n2. Solo fósiles\n3. Conjunto de residuos materiales del pasado\n4. Solo estructuras'],
-      ['Correct answers:', '', '', '3. Conjunto de residuos materiales del pasado'],
-      ['Time:', '', '', 30]
-    ]}]);
+    const file = workbook([
+      {
+        name: 'Plantilla',
+        rows: [
+          ['Question:', '', '', '¿Qué es el registro arqueológico?'],
+          ['Choices:', '', '', '1. Solo restos líticos\n2. Solo fósiles\n3. Conjunto de residuos materiales del pasado\n4. Solo estructuras'],
+          ['Correct answers:', '', '', '3. Conjunto de residuos materiales del pasado'],
+          ['Time:', '', '', 30]
+        ]
+      }
+    ]);
     return apiResponse(file, 200, {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Content-Disposition': 'attachment; filename="plantilla-pulso.xlsx"'
@@ -261,18 +280,20 @@ async function handleApi(request, env) {
   const participantId = cookies[`pulso_${code}`];
 
   if (action === 'display' && request.method === 'GET') {
-    return apiResponse(await displayState(env.DB, code, now));
+    return apiResponse(await displayState(env.DB, code, owner, now));
   }
 
   if (action === 'join' && request.method === 'POST') {
     const currentSession = await session(env.DB, code, now);
     requireValue(!currentSession.ended, 'La sesión ya ha finalizado.');
-    if (participantId && await first(env.DB, 'SELECT id FROM participants WHERE id=? AND code=?', participantId, code)) {
+    if (participantId && (await first(env.DB, 'SELECT id FROM participants WHERE id=? AND code=?', participantId, code))) {
       return apiResponse(await state(env.DB, code, null, participantId, now));
     }
-    const name = String(body.name || '').trim().replace(/\s+/g, ' ');
+    const name = String(body.name || '')
+      .trim()
+      .replace(/\s+/g, ' ');
     requireValue(name && name.length <= 60, 'Escribe un nombre o identificador de hasta 60 caracteres.');
-    requireValue(!await first(env.DB, 'SELECT id FROM participants WHERE code=? AND name=? COLLATE NOCASE', code, name), 'Ese identificador ya está en uso. Añade tu apellido o un número.', 409);
+    requireValue(!(await first(env.DB, 'SELECT id FROM participants WHERE code=? AND name=? COLLATE NOCASE', code, name)), 'Ese identificador ya está en uso. Añade tu apellido o un número.', 409);
     const id = token();
     try {
       await run(env.DB, 'INSERT INTO participants(id,code,name,joined) VALUES(?,?,?,?)', id, code, name, now);
@@ -288,11 +309,11 @@ async function handleApi(request, env) {
 
   if (action === 'answer' && request.method === 'POST') {
     await session(env.DB, code, now);
-    requireValue(participantId && await first(env.DB, 'SELECT id FROM participants WHERE id=? AND code=?', participantId, code), 'Entra antes de responder.', 401);
+    requireValue(participantId && (await first(env.DB, 'SELECT id FROM participants WHERE id=? AND code=?', participantId, code)), 'Entra antes de responder.', 401);
     const question = await first(env.DB, 'SELECT * FROM questions WHERE id=? AND code=?', String(body.question), code);
     requireValue(question && question.started !== null && question.closed === null && now < Number(question.started) + Number(question.seconds) * 1000, 'La pregunta está cerrada.', 409);
     requireValue(Number.isInteger(body.choice) && body.choice >= 0 && body.choice < JSON.parse(question.options).length, 'Opción no válida.');
-    requireValue(!await first(env.DB, 'SELECT choice FROM answers WHERE question=? AND participant=?', question.id, participantId), 'Ya has enviado tu respuesta.', 409);
+    requireValue(!(await first(env.DB, 'SELECT choice FROM answers WHERE question=? AND participant=?', question.id, participantId)), 'Ya has enviado tu respuesta.', 409);
     try {
       await run(env.DB, 'INSERT INTO answers(question,participant,choice,created,elapsed) VALUES(?,?,?,?,?)', question.id, participantId, body.choice, now, now - Number(question.started));
     } catch {
@@ -309,8 +330,8 @@ async function handleApi(request, env) {
     for (let attempt = 0; attempt < 20; attempt++) {
       const random = new Uint32Array(1);
       crypto.getRandomValues(random);
-      copyCode = String(random[0] % 900000 + 100000);
-      if (!await first(env.DB, 'SELECT code FROM sessions WHERE code=?', copyCode)) break;
+      copyCode = String((random[0] % 900000) + 100000);
+      if (!(await first(env.DB, 'SELECT code FROM sessions WHERE code=?', copyCode))) break;
       copyCode = null;
     }
     requireValue(copyCode, 'No se ha podido generar un código para la copia. Inténtalo de nuevo.', 503);
@@ -327,44 +348,64 @@ async function handleApi(request, env) {
   }
 
   if (action === 'export' && request.method === 'GET') {
-    const [questionResults, participantResults, answerResults] = await env.DB.batch([
-      env.DB.prepare('SELECT * FROM questions WHERE code=? ORDER BY position').bind(code),
-      env.DB.prepare('SELECT * FROM participants WHERE code=? ORDER BY joined').bind(code),
-      env.DB.prepare('SELECT a.* FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=?').bind(code)
-    ]);
+    const [questionResults, participantResults, answerResults] = await env.DB.batch([env.DB.prepare('SELECT * FROM questions WHERE code=? ORDER BY position').bind(code), env.DB.prepare('SELECT * FROM participants WHERE code=? ORDER BY joined').bind(code), env.DB.prepare('SELECT a.* FROM answers a JOIN questions q ON q.id=a.question WHERE q.code=?').bind(code)]);
     const questions = questionResults.results;
     const participants = participantResults.results;
     const answers = answerResults.results;
     const correct = answers.filter(answer => Number(questions.find(question => question.id === answer.question).correct) === Number(answer.choice)).length;
     const total = answers.length;
     const summary = [
-      ['Métrica', 'Valor'], ['Sesión', currentSession.title], ['Código', code], ['Estado', currentSession.ended ? 'Finalizada' : 'En curso'],
-      ['Participantes', participants.length], ['Preguntas', questions.length], ['Respuestas', total], ['Aciertos', correct], ['Errores', total - correct],
-      ['Aciertos (%)', total ? 100 * correct / total : 0], ['Errores (%)', total ? 100 * (total - correct) / total : 0],
+      ['Métrica', 'Valor'],
+      ['Sesión', currentSession.title],
+      ['Código', code],
+      ['Estado', currentSession.ended ? 'Finalizada' : 'En curso'],
+      ['Participantes', participants.length],
+      ['Preguntas', questions.length],
+      ['Respuestas', total],
+      ['Aciertos', correct],
+      ['Errores', total - correct],
+      ['Aciertos (%)', total ? (100 * correct) / total : 0],
+      ['Errores (%)', total ? (100 * (total - correct)) / total : 0],
       ['Cálculo', 'Porcentajes sobre respuestas recibidas; las ausencias no cuentan como errores.']
     ];
     const grouped = [];
     for (const answer of answers) {
       const found = grouped.find(row => row.question === answer.question && Number(row.choice) === Number(answer.choice));
       if (found) found.count++;
-      else grouped.push({question: answer.question, choice: Number(answer.choice), count: 1});
+      else
+        grouped.push({
+          question: answer.question,
+          choice: Number(answer.choice),
+          count: 1
+        });
     }
-    const questionRows = [['Nº', 'Pregunta', 'Opciones', 'Correcta', 'Tiempo configurado (s)', 'Estado', 'Respuestas', 'Aciertos (%)', 'Errores (%)'], ...questions.map(question => {
-      const result = resultFor(question, grouped);
-      const options = JSON.parse(question.options);
-      return [Number(question.position) + 1, question.title, options.map((option, index) => `${index + 1}. ${option}`).join('\n'), options[question.correct], Number(question.seconds), question.closed !== null ? 'Cerrada' : question.started !== null ? 'Abierta' : 'Pendiente', result.total, result.correctPercent, result.errorPercent];
-    })];
+    const questionRows = [
+      ['Nº', 'Pregunta', 'Opciones', 'Correcta', 'Tiempo configurado (s)', 'Estado', 'Respuestas', 'Aciertos (%)', 'Errores (%)'],
+      ...questions.map(question => {
+        const result = resultFor(question, grouped);
+        const options = JSON.parse(question.options);
+        return [Number(question.position) + 1, question.title, options.map((option, index) => `${index + 1}. ${option}`).join('\n'), options[question.correct], Number(question.seconds), question.closed !== null ? 'Cerrada' : question.started !== null ? 'Abierta' : 'Pendiente', result.total, result.correctPercent, result.errorPercent];
+      })
+    ];
     const responses = [['Identificador', 'Participante', 'Nº pregunta', 'Pregunta', 'Respuesta', 'Evaluación', 'Tiempo de respuesta (s)', 'Fecha UTC']];
     for (const question of questions.filter(value => value.started !== null)) {
       for (const participant of participants) {
         const answer = answers.find(value => value.question === question.id && value.participant === participant.id);
-        responses.push([participant.id, participant.name, Number(question.position) + 1, question.title, answer ? JSON.parse(question.options)[answer.choice] : '', answer ? Number(answer.choice) === Number(question.correct) ? 'Correcta' : 'Incorrecta' : 'Sin respuesta', answer ? Number(answer.elapsed) / 1000 : '', answer ? new Date(Number(answer.created)).toISOString() : '']);
+        responses.push([participant.id, participant.name, Number(question.position) + 1, question.title, answer ? JSON.parse(question.options)[answer.choice] : '', answer ? (Number(answer.choice) === Number(question.correct) ? 'Correcta' : 'Incorrecta') : 'Sin respuesta', answer ? Number(answer.elapsed) / 1000 : '', answer ? new Date(Number(answer.created)).toISOString() : '']);
       }
     }
-    return apiResponse(workbook([{name: 'Resumen', rows: summary}, {name: 'Preguntas', rows: questionRows}, {name: 'Respuestas individuales', rows: responses}]), 200, {
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="pulso-${code}.xlsx"`
-    });
+    return apiResponse(
+      workbook([
+        {name: 'Resumen', rows: summary},
+        {name: 'Preguntas', rows: questionRows},
+        {name: 'Respuestas individuales', rows: responses}
+      ]),
+      200,
+      {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="pulso-${code}.xlsx"`
+      }
+    );
   }
 
   if (action === 'delete' && request.method === 'POST') {
@@ -400,7 +441,7 @@ async function handleApi(request, env) {
   }
 
   if (action === 'start' && request.method === 'POST') {
-    requireValue(!await first(env.DB, 'SELECT id FROM questions WHERE code=? AND started IS NOT NULL AND closed IS NULL', code), 'Cierra la pregunta actual antes de continuar.', 409);
+    requireValue(!(await first(env.DB, 'SELECT id FROM questions WHERE code=? AND started IS NOT NULL AND closed IS NULL', code)), 'Cierra la pregunta actual antes de continuar.', 409);
     const question = await first(env.DB, 'SELECT * FROM questions WHERE id=? AND code=?', String(body.id), code);
     requireValue(question && question.started === null, 'Esta pregunta ya se ha iniciado.', 409);
     try {
@@ -416,11 +457,15 @@ async function handleApi(request, env) {
     return apiResponse(await state(env.DB, code, owner, participantId, now));
   }
 
+  if (action === 'reveal' && request.method === 'POST') {
+    const question = await first(env.DB, 'SELECT id,closed FROM questions WHERE id=? AND code=?', String(body.id), code);
+    requireValue(question && question.closed !== null, 'Cierra la votación antes de mostrar los resultados.', 409);
+    await run(env.DB, 'UPDATE questions SET revealed=1 WHERE id=?', question.id);
+    return apiResponse(await state(env.DB, code, owner, participantId, now));
+  }
+
   if (action === 'finish' && request.method === 'POST') {
-    await env.DB.batch([
-      env.DB.prepare('UPDATE questions SET closed=? WHERE code=? AND started IS NOT NULL AND closed IS NULL').bind(now, code),
-      env.DB.prepare('UPDATE sessions SET ended=1 WHERE code=?').bind(code)
-    ]);
+    await env.DB.batch([env.DB.prepare('UPDATE questions SET closed=COALESCE(closed,?), revealed=1 WHERE code=? AND started IS NOT NULL').bind(now, code), env.DB.prepare('UPDATE sessions SET ended=1 WHERE code=?').bind(code)]);
     return apiResponse(await state(env.DB, code, owner, participantId, now));
   }
 
@@ -433,13 +478,22 @@ export async function handleRequest(request, env) {
     const asset = await env.ASSETS.fetch(request);
     const headers = new Headers(asset.headers);
     for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
-    return new Response(asset.body, {status: asset.status, statusText: asset.statusText, headers});
+    return new Response(asset.body, {
+      status: asset.status,
+      statusText: asset.statusText,
+      headers
+    });
   }
   try {
     return await handleApi(request, env);
   } catch (error) {
     if (!error.status) console.error(error);
-    return apiResponse({error: error.status ? error.message : 'No se ha podido completar la operación. Inténtalo de nuevo.'}, error.status || 500);
+    return apiResponse(
+      {
+        error: error.status ? error.message : 'No se ha podido completar la operación. Inténtalo de nuevo.'
+      },
+      error.status || 500
+    );
   }
 }
 

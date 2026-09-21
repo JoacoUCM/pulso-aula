@@ -65,7 +65,7 @@ El profesor entra en la dirección principal. Los alumnos utilizan:
 https://pulso-aula.NOMBRE-DE-TU-CUENTA.workers.dev/alumno
 ```
 
-En cada sesión, el profesor dispone de un botón **Pantalla de proyección**. Esta vista muestra un QR grande, el código, la pregunta, las opciones, la cuenta atrás y el número de respuestas. No revela la solución mientras la pregunta está abierta; al cerrarla presenta los resultados y señala la respuesta correcta.
+En cada sesión, el profesor dispone de un botón **Pantalla de proyección**. Esta vista muestra un QR grande, el código, la pregunta, las opciones, la cuenta atrás y el número de respuestas. Cuando se abre desde el navegador autorizado del profesor también permite iniciar preguntas, cerrar la votación, mostrar los resultados y finalizar la sesión. La misma URL abierta en otro navegador continúa siendo una pantalla pública de solo lectura.
 
 ## Probar antes de publicar
 
@@ -95,7 +95,7 @@ El comando aplica primero las migraciones pendientes de D1 y después publica el
 - Durante una pregunta la interfaz consulta cambios cada 2 segundos; mientras espera, cada 5 segundos. Esta configuración está pensada para una clase ordinaria y reduce el consumo del plan gratuito.
 - El QR se genera íntegramente en el navegador; no envía el enlace a servicios externos.
 - La respuesta se valida en el servidor y no se acepta fuera de plazo.
-- La respuesta correcta y los resultados permanecen ocultos para el alumno hasta cerrar la pregunta.
+- La respuesta correcta y los resultados permanecen ocultos para el alumno hasta que el profesor los muestra. Cerrar la votación y revelar los resultados son acciones independientes.
 - Cada sesión admite hasta 100 preguntas y cada pregunta entre 2 y 8 opciones.
 - La importación admite `.xlsx`, texto copiado desde Excel y Markdown. El archivo Excel puede ocupar hasta 5 MB.
 

@@ -1,31 +1,46 @@
 .qr-svg { display: block; width: 100%; height: auto; background: #fff; }
 .teacher-qr { width: 82px; min-width: 82px; padding: 5px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
 .display-header { height: 72px; }
-.projector { max-width: 1600px; margin: auto; padding: 26px 4% 42px; }
-.projector-heading { display: flex; align-items: center; justify-content: space-between; gap: 30px; margin-bottom: 20px; }
-.projector-heading h1 { font-size: clamp(32px, 3.2vw, 54px); margin: 0; }
+.projector { max-width: 1600px; height: calc(100vh - 72px); margin: auto; padding: 18px 4% 24px; display: flex; flex-direction: column; overflow: hidden; }
+.projector-heading { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 30px; margin-bottom: 12px; }
+.projector-heading h1 { font-size: clamp(27px, 2.6vw, 44px); margin: 0; }
 .projector-people { display: grid; grid-template-columns: auto auto; align-items: center; gap: 0 12px; text-align: right; }
 .projector-people strong { font-size: 34px; line-height: 1; }
 .projector-people span { color: var(--muted); }
 .projector-people .connection { grid-column: 1 / 3; justify-self: end; margin-top: 8px; }
-.projector-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 24vw); gap: 24px; align-items: stretch; }
-.projector-content { min-height: calc(100vh - 190px); padding: clamp(28px, 4vw, 62px); }
-.projector-content .question-top { margin-bottom: 30px; }
-.projector-content .countdown { font-size: clamp(34px, 4vw, 60px); }
-.projector-question { font-size: clamp(30px, 3.5vw, 58px); line-height: 1.2; margin-bottom: 35px; }
-.projector-options { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.projector-options .option { font-size: clamp(18px, 1.8vw, 30px); padding: clamp(16px, 2vw, 27px); }
+.projector-controls { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 9px 12px; margin-bottom: 12px; border: 1px solid #d8d4ff; border-radius: 12px; background: #f3f1ff; }
+.projector-controls .eyebrow { margin: 0; }
+.projector-controls .actions { justify-content: flex-end; }
+.projector-control-status { color: var(--muted); font-size: 14px; }
+.projector-grid { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(250px, 22vw); gap: 18px; align-items: stretch; }
+.projector-content { --projection-question: clamp(22px, 2.15vw, 36px); --projection-answer: clamp(20px, 1.9vw, 32px); min-height: 0; height: 100%; overflow: hidden; padding: clamp(20px, 2.6vw, 42px); }
+.projector-content .question-top { margin-bottom: clamp(12px, 2vh, 22px); }
+.projector-content .countdown { font-size: clamp(30px, 3.4vw, 52px); }
+.projector-question { font-size: var(--projection-question); line-height: 1.18; margin-bottom: clamp(16px, 2.5vh, 28px); overflow-wrap: anywhere; }
+.projector-options { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(9px, 1.5vh, 16px); }
+.projector-options .option { font-size: var(--projection-answer); line-height: 1.28; padding: clamp(11px, 1.5vw, 20px); }
 .projector-options .letter { width: 42px; min-width: 42px; height: 42px; font-size: 18px; }
-.projector-response-count { text-align: right; color: var(--muted); font-size: clamp(16px, 1.4vw, 22px); margin-top: 26px; }
+.projector-response-count { text-align: right; color: var(--muted); font-size: clamp(15px, 1.3vw, 20px); margin-top: clamp(12px, 2vh, 22px); }
+.projector-closed-note { margin-top: 18px; padding: 12px; border-radius: 9px; background: #f1f2f8; color: var(--muted); text-align: center; font-weight: 650; }
 .projector-join { text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 26px; }
-.projector-qr { width: min(100%, 360px); margin: 12px auto 24px; }
+.projector-qr { width: min(100%, 34vh, 360px); margin: 10px auto 18px; }
 .projector-join .session-code { font-size: clamp(38px, 4.5vw, 70px); letter-spacing: .16em; }
 .projector-join p { font-size: clamp(13px, 1.2vw, 18px); overflow-wrap: anywhere; margin-bottom: 0; }
-.projector-wait { display: flex; min-height: 420px; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.projector-wait { display: flex; min-height: 0; height: 100%; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .projector-wait h2 { font-size: clamp(28px, 3vw, 48px); }
-.projector-content .bar-label { font-size: clamp(16px, 1.4vw, 23px); }
+.projector-content .bar-label { font-size: var(--projection-answer); line-height: 1.25; }
 .projector-content .bar-track { height: 18px; }
 .projector-content .score { font-size: clamp(28px, 3vw, 48px); }
+.projector-compact { --projection-question: clamp(20px, 1.85vw, 31px); --projection-answer: clamp(18px, 1.65vw, 27px); }
+.projector-dense { --projection-question: clamp(18px, 1.55vw, 27px); --projection-answer: clamp(16px, 1.38vw, 24px); }
+.projector-very-dense { --projection-question: clamp(16px, 1.3vw, 23px); --projection-answer: clamp(14px, 1.15vw, 20px); }
+.projector-content.projection-tight { padding: clamp(13px, 1.8vw, 25px); }
+.projector-content.projection-tight .question-top { margin-bottom: 9px; }
+.projector-content.projection-tight .projector-question { margin-bottom: 11px; }
+.projector-content.projection-tight .projector-options { gap: 7px; }
+.projector-content.projection-tight .projector-options .option { padding: 8px 10px; }
+.projector-content.projection-tight .bar-row { margin: 8px 0; }
+.projector-content.projection-tight .score-grid { margin-top: 12px; padding-top: 12px; }
 
 @media (max-width: 1000px) {
   .teacher-qr { display: none; }
@@ -37,7 +52,9 @@
   .projector { padding: 20px; }
   .projector-heading { align-items: flex-start; }
   .projector-grid { grid-template-columns: 1fr; }
-  .projector-content { min-height: auto; }
+  .projector { height: auto; min-height: calc(100vh - 72px); overflow: visible; }
+  .projector-content { min-height: auto; height: auto; overflow: visible; }
+  .projector-controls { align-items: flex-start; flex-direction: column; }
   .projector-join { order: -1; }
   .projector-qr { width: 190px; }
 }

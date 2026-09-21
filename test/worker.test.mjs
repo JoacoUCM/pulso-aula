@@ -1,11 +1,11 @@
-import { test } from 'node:test';
+import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
-import { handleRequest } from '../src/worker.mjs';
-import { importQuestions, parseTable } from '../lib/import.mjs';
-import { readWorkbook, workbook } from '../lib/excel.mjs';
-import { qrSvg } from '../public/qr.js';
+import {DatabaseSync} from 'node:sqlite';
+import {readFileSync, readdirSync} from 'node:fs';
+import {handleRequest} from '../src/worker.mjs';
+import {importQuestions, parseTable} from '../lib/import.mjs';
+import {readWorkbook, workbook} from '../lib/excel.mjs';
+import {qrSvg} from '../public/qr.js';
 
 class D1StatementMock {
   constructor(database, sql, params = []) {
@@ -31,7 +31,12 @@ class D1StatementMock {
 class D1Mock {
   constructor() {
     this.database = new DatabaseSync(':memory:');
-    this.database.exec(readFileSync(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8'));
+    const migrations = new URL('../migrations/', import.meta.url);
+    for (const file of readdirSync(migrations)
+      .filter(file => file.endsWith('.sql'))
+      .sort()) {
+      this.database.exec(readFileSync(new URL(file, migrations), 'utf8'));
+    }
   }
   prepare(sql) {
     return new D1StatementMock(this.database, sql);
@@ -63,17 +68,33 @@ const question = {
   seconds: 30
 };
 
+const secondQuestion = {
+  title: '¿Qué proceso puede alterar la posición de los objetos?',
+  options: ['Pisoteo', 'Datación', 'Dibujo'],
+  correct: 0,
+  seconds: 30
+};
+
 function client(env) {
   const cookies = {};
   return async (path, body, expected = 200, binary = false) => {
     const headers = new Headers();
     if (body !== undefined) headers.set('Content-Type', 'application/json');
-    if (Object.keys(cookies).length) headers.set('Cookie', Object.entries(cookies).map(([key, value]) => `${key}=${value}`).join('; '));
-    const response = await handleRequest(new Request(`https://pulso.example${path}`, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body)
-    }), env);
+    if (Object.keys(cookies).length)
+      headers.set(
+        'Cookie',
+        Object.entries(cookies)
+          .map(([key, value]) => `${key}=${value}`)
+          .join('; ')
+      );
+    const response = await handleRequest(
+      new Request(`https://pulso.example${path}`, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body)
+      }),
+      env
+    );
     for (const cookie of response.headers.getSetCookie()) {
       const [pair] = cookie.split(';');
       const separator = pair.indexOf('=');
@@ -86,8 +107,21 @@ function client(env) {
 
 test('Importa tablas y genera libros XLSX válidos', () => {
   const rows = parseTable('Question:\t¿Pregunta?\nChoices:\t"1. Uno\n2. Dos"\nCorrect answers:\t2. Dos\nTime:\t20');
-  assert.deepEqual(importQuestions(rows).questions[0], {title: '¿Pregunta?', options: ['Uno', 'Dos'], correct: 1, seconds: 20});
-  const file = workbook([{name: 'Datos', rows: [['Texto', 2], ['<seguro>', '=NO_ES_FORMULA()']]}]);
+  assert.deepEqual(importQuestions(rows).questions[0], {
+    title: '¿Pregunta?',
+    options: ['Uno', 'Dos'],
+    correct: 1,
+    seconds: 20
+  });
+  const file = workbook([
+    {
+      name: 'Datos',
+      rows: [
+        ['Texto', 2],
+        ['<seguro>', '=NO_ES_FORMULA()']
+      ]
+    }
+  ]);
   assert.deepEqual(readWorkbook(file)[0][1], ['<seguro>', '=NO_ES_FORMULA()']);
 });
 
@@ -111,13 +145,20 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     await teacher('/api/bootstrap');
     const {code} = await teacher('/api/sessions', {title: 'Arqueología docente'}, 201);
     const endpoint = action => `/api/sessions/${code}${action ? `/${action}` : ''}`;
-    let state = await teacher(endpoint('questions'), {questions: [question]});
+    let state = await teacher(endpoint('questions'), {
+      questions: [question, secondQuestion]
+    });
     const questionId = state.questions[0].id;
+    const secondQuestionId = state.questions[1].id;
     await student(endpoint('join'), {name: 'Alumna A'});
     await stranger(endpoint(), undefined, 401);
     await stranger(endpoint('start'), {id: questionId}, 403);
     state = await stranger(endpoint('display'));
+    assert.equal(state.teacher, false);
     assert.equal(state.questions.length, 0);
+    state = await teacher(endpoint('display'));
+    assert.equal(state.teacher, true);
+    assert.equal(state.questions.length, 2);
     await teacher(endpoint('start'), {id: questionId});
     state = await student(endpoint());
     assert.equal(state.questions[0].correct, undefined);
@@ -130,11 +171,29 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     assert.equal(state.questions[0].received, 1);
     await teacher(endpoint('close'), {id: questionId});
     state = await student(endpoint());
+    assert.equal(state.questions[0].result, undefined);
+    assert.equal(state.questions[0].correct, undefined);
+    state = await stranger(endpoint('display'));
+    assert.equal(state.questions[0].result, undefined);
+    assert.equal(state.questions[0].correct, undefined);
+    await stranger(endpoint('reveal'), {id: questionId}, 403);
+    await teacher(endpoint('reveal'), {id: questionId});
+    state = await student(endpoint());
     assert.equal(state.questions[0].result.correctPercent, 100);
     assert.equal(state.questions[0].correct, 1);
     state = await stranger(endpoint('display'));
     assert.equal(state.questions[0].correct, 1);
     assert.equal(state.questions[0].result.correctPercent, 100);
+    await teacher(endpoint('start'), {id: secondQuestionId});
+    db.database.prepare('UPDATE questions SET started=? WHERE id=?').run(Date.now() - 31_000, secondQuestionId);
+    state = await student(endpoint());
+    assert.notEqual(state.questions[1].closed, null);
+    assert.equal(state.questions[1].revealed, false);
+    await student(endpoint('answer'), {question: secondQuestionId, choice: 0}, 409);
+    await teacher(endpoint('finish'), {});
+    state = await stranger(endpoint('display'));
+    assert.equal(state.ended, true);
+    assert.equal(state.questions[1].revealed, true);
     const exported = await teacher(endpoint('export'), undefined, 200, true);
     const sheets = readWorkbook(exported);
     assert.equal(sheets.length, 3);
@@ -144,7 +203,7 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     assert.notEqual(copy.code, code);
     state = await teacher(`/api/sessions/${copy.code}`);
     assert.equal(state.title, 'Copia de Arqueología docente');
-    assert.equal(state.questions.length, 1);
+    assert.equal(state.questions.length, 2);
     assert.equal(state.questions[0].started, null);
     assert.equal(state.questions[0].closed, null);
     assert.equal(state.participants, 0);
@@ -162,7 +221,12 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
 test('Sirve los recursos estáticos mediante el binding ASSETS', async () => {
   let requested;
   const response = await handleRequest(new Request('https://pulso.example/alumno'), {
-    ASSETS: {fetch: async request => { requested = request.url; return new Response('inicio'); }}
+    ASSETS: {
+      fetch: async request => {
+        requested = request.url;
+        return new Response('inicio');
+      }
+    }
   });
   assert.equal(await response.text(), 'inicio');
   assert.equal(requested, 'https://pulso.example/alumno');
