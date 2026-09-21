@@ -1,0 +1,16 @@
+{
+  "name": "pulso-aula-cloudflare",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "node --test",
+    "db:local": "wrangler d1 migrations apply pulso-aula --local",
+    "db:remote": "wrangler d1 migrations apply pulso-aula --remote",
+    "deploy": "wrangler d1 migrations apply pulso-aula --remote && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.38.0"
+  }
+}
