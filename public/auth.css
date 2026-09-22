@@ -1,0 +1,86 @@
+.teacher-account {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.teacher-account .btn {
+  padding: 7px 0;
+  font-size: 13px;
+}
+
+.auth-page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 58px 5% 70px;
+}
+
+.auth-heading {
+  max-width: 720px;
+  margin-bottom: 30px;
+}
+
+.auth-heading h1 {
+  font-size: clamp(30px, 4vw, 48px);
+}
+
+.auth-heading > p {
+  max-width: 650px;
+}
+
+.auth-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.auth-grid.single {
+  grid-template-columns: minmax(0, 520px);
+}
+
+.auth-card-center {
+  width: 100%;
+}
+
+.auth-message p {
+  margin-bottom: 24px;
+}
+
+.auth-card h2 {
+  margin: 18px 0 24px;
+  font-size: 26px;
+}
+
+.auth-card .hint {
+  margin-top: -5px;
+}
+
+.legacy-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 22px;
+  padding: 15px 17px;
+  border: 1px solid #bfe1d5;
+  border-radius: 10px;
+  background: #edf8f4;
+  color: #176c5e;
+  font-size: 14px;
+}
+
+@media (max-width: 720px) {
+  .teacher-account > span {
+    display: none;
+  }
+
+  .auth-page {
+    padding: 36px 20px 55px;
+  }
+
+  .auth-grid {
+    grid-template-columns: 1fr;
+  }
+}

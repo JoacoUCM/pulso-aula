@@ -75,8 +75,16 @@ const secondQuestion = {
   seconds: 30
 };
 
-function client(env) {
-  const cookies = {};
+const testSalt = '0123456789abcdef0123456789abcdef';
+async function passwordProof(password, salt = testSalt) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const saltBytes = new Uint8Array(salt.match(/.{2}/g).map(value => Number.parseInt(value, 16)));
+  const bits = await crypto.subtle.deriveBits({name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations: 210000}, key, 256);
+  return [...new Uint8Array(bits)].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function client(env, initialCookies = {}) {
+  const cookies = {...initialCookies};
   return async (path, body, expected = 200, binary = false) => {
     const headers = new Headers();
     if (body !== undefined) headers.set('Content-Type', 'application/json');
@@ -139,12 +147,25 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     ASSETS: {fetch: async () => new Response('asset')}
   };
   const teacher = client(env);
+  const secondComputer = client(env);
   const student = client(env);
   const stranger = client(env);
   try {
-    await teacher('/api/bootstrap');
+    let bootstrap = await teacher('/api/bootstrap');
+    assert.equal(bootstrap.authenticated, false);
+    await teacher('/api/sessions', {title: 'Sin acceso'}, 401);
+    const correctProof = await passwordProof('una-clave-segura');
+    bootstrap = await teacher('/api/auth/register', {email: 'Profesor@UCM.es', salt: testSalt, proof: correctProof}, 201);
+    assert.equal(bootstrap.authenticated, true);
+    assert.equal(bootstrap.email, 'profesor@ucm.es');
+    await teacher('/api/auth/register', {email: 'profesor@ucm.es', salt: testSalt, proof: await passwordProof('otra-clave-segura')}, 409);
+    await secondComputer('/api/auth/login', {email: 'profesor@ucm.es', proof: await passwordProof('incorrecta-00')}, 401);
+    const {salt: loginSalt} = await secondComputer('/api/auth/salt?email=profesor%40ucm.es');
+    await secondComputer('/api/auth/login', {email: 'profesor@ucm.es', proof: await passwordProof('una-clave-segura', loginSalt)});
     const {code} = await teacher('/api/sessions', {title: 'Arqueología docente'}, 201);
     const endpoint = action => `/api/sessions/${code}${action ? `/${action}` : ''}`;
+    assert.equal((await secondComputer('/api/bootstrap')).sessions[0].code, code);
+    assert.equal((await secondComputer(endpoint())).title, 'Arqueología docente');
     let state = await teacher(endpoint('questions'), {
       questions: [question, secondQuestion]
     });
@@ -152,7 +173,7 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     const secondQuestionId = state.questions[1].id;
     await student(endpoint('join'), {name: 'Alumna A'});
     await stranger(endpoint(), undefined, 401);
-    await stranger(endpoint('start'), {id: questionId}, 403);
+    await stranger(endpoint('start'), {id: questionId}, 401);
     state = await stranger(endpoint('display'));
     assert.equal(state.teacher, false);
     assert.equal(state.questions.length, 0);
@@ -176,7 +197,7 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     state = await stranger(endpoint('display'));
     assert.equal(state.questions[0].result, undefined);
     assert.equal(state.questions[0].correct, undefined);
-    await stranger(endpoint('reveal'), {id: questionId}, 403);
+    await stranger(endpoint('reveal'), {id: questionId}, 401);
     await teacher(endpoint('reveal'), {id: questionId});
     state = await student(endpoint());
     assert.equal(state.questions[0].result.correctPercent, 100);
@@ -198,7 +219,7 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     const sheets = readWorkbook(exported);
     assert.equal(sheets.length, 3);
     assert.equal(sheets[0].find(row => row[0] === 'Aciertos')[1], '1');
-    await stranger(endpoint('duplicate'), {}, 403);
+    await stranger(endpoint('duplicate'), {}, 401);
     const copy = await teacher(endpoint('duplicate'), {}, 201);
     assert.notEqual(copy.code, code);
     state = await teacher(`/api/sessions/${copy.code}`);
@@ -213,9 +234,108 @@ test('Flujo completo en Worker con D1: permisos, respuesta, exportación y borra
     await teacher(endpoint(), undefined, 404);
     await teacher(`/api/sessions/${copy.code}/delete`, {});
     assert.equal((await teacher('/api/bootstrap')).sessions.length, 0);
+    await teacher('/api/auth/logout', {});
+    assert.equal((await teacher('/api/bootstrap')).authenticated, false);
+    await teacher('/api/sessions', {title: 'Después de salir'}, 401);
   } finally {
     db.close();
   }
+});
+
+test('Recupera la contraseña por correo con un enlace temporal de un solo uso', async () => {
+  const db = new D1Mock();
+  const sent = [];
+  const env = {
+    DB: db,
+    ASSETS: {fetch: async () => new Response('asset')},
+    RESEND_API_KEY: 're_test',
+    EMAIL_FETCH: async (url, options) => {
+      sent.push({url, options, body: JSON.parse(options.body)});
+      return Response.json({id: 'email-test'});
+    }
+  };
+  const originalBrowser = client(env);
+  const otherComputer = client(env);
+  const recoveryBrowser = client(env);
+  const loginAfterReset = client(env);
+  try {
+    const oldProof = await passwordProof('contraseña-anterior');
+    await originalBrowser('/api/auth/register', {email: 'profesor@ucm.es', salt: testSalt, proof: oldProof}, 201);
+    await otherComputer('/api/auth/login', {email: 'profesor@ucm.es', proof: oldProof});
+
+    const response = await recoveryBrowser('/api/auth/password/request', {email: 'PROFESOR@UCM.ES'});
+    assert.match(response.message, /30 minutos/);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].url, 'https://api.resend.com/emails');
+    assert.deepEqual(sent[0].body.to, ['profesor@ucm.es']);
+    assert.match(sent[0].body.subject, /contraseña de Pulso Aula/);
+    const resetToken = sent[0].body.text.match(/\?reset=([a-f0-9]{64})/)[1];
+
+    await recoveryBrowser('/api/auth/password/request', {email: 'profesor@ucm.es'});
+    assert.equal(sent.length, 1, 'No debe reenviar durante el intervalo de seguridad');
+    await recoveryBrowser('/api/auth/password/request', {email: 'no-existe@ucm.es'});
+    assert.equal(sent.length, 1, 'La respuesta no debe revelar cuentas inexistentes');
+
+    const newSalt = 'abcdef0123456789abcdef0123456789';
+    const resetState = await recoveryBrowser('/api/auth/password/reset', {
+      token: resetToken,
+      salt: newSalt,
+      proof: await passwordProof('contraseña-nueva-segura', newSalt)
+    });
+    assert.equal(resetState.authenticated, true);
+    assert.equal(resetState.email, 'profesor@ucm.es');
+    assert.equal((await otherComputer('/api/bootstrap')).authenticated, false, 'El cambio debe cerrar las sesiones anteriores');
+    await recoveryBrowser('/api/auth/password/reset', {
+      token: resetToken,
+      salt: newSalt,
+      proof: await passwordProof('otra-contraseña', newSalt)
+    }, 400);
+
+    await loginAfterReset('/api/auth/login', {email: 'profesor@ucm.es', proof: oldProof}, 401);
+    const {salt} = await loginAfterReset('/api/auth/salt?email=profesor%40ucm.es');
+    await loginAfterReset('/api/auth/login', {
+      email: 'profesor@ucm.es',
+      proof: await passwordProof('contraseña-nueva-segura', salt)
+    });
+    assert.equal((await loginAfterReset('/api/bootstrap')).authenticated, true);
+  } finally {
+    db.close();
+  }
+});
+
+test('Vincula las encuestas antiguas a la cuenta docente al registrarse', async () => {
+  const db = new D1Mock();
+  const legacyOwner = 'a'.repeat(48);
+  db.database.prepare('INSERT INTO sessions(code,owner,title,created) VALUES(?,?,?,?)').run('654321', legacyOwner, 'Encuesta anterior', Date.now());
+  const browser = client(
+    {DB: db, ASSETS: {fetch: async () => new Response('asset')}},
+    {pulso_teacher: legacyOwner}
+  );
+  const otherComputer = client({DB: db, ASSETS: {fetch: async () => new Response('asset')}});
+  try {
+    let state = await browser('/api/bootstrap');
+    assert.equal(state.authenticated, false);
+    assert.equal(state.legacySessions, true);
+    const proof = await passwordProof('contraseña-segura');
+    state = await browser('/api/auth/register', {email: 'docente@ucm.es', salt: testSalt, proof}, 201);
+    assert.equal(state.sessions.length, 1);
+    assert.equal(state.sessions[0].code, '654321');
+    const {salt} = await otherComputer('/api/auth/salt?email=docente%40ucm.es');
+    await otherComputer('/api/auth/login', {email: 'docente@ucm.es', proof: await passwordProof('contraseña-segura', salt)});
+    state = await otherComputer('/api/bootstrap');
+    assert.equal(state.sessions[0].title, 'Encuesta anterior');
+  } finally {
+    db.close();
+  }
+});
+
+test('La cabecera del alumno no ofrece acceso a Profesor', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const studentHeader = source.slice(source.indexOf('if (role === "student")'), source.indexOf('return `<header><a class="brand"', source.indexOf('if (role === "student")')));
+  assert.doesNotMatch(studentHeader, /data-action="teacher"|>Profesor</);
+  assert.match(studentHeader, /Vista del alumno/);
+  assert.match(source, /He olvidado mi contraseña/);
+  assert.match(source, /reset-password-form/);
 });
 
 test('Sirve los recursos estáticos mediante el binding ASSETS', async () => {

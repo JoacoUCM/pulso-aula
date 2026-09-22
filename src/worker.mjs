@@ -5,7 +5,7 @@ import {importQuestions, parseTable} from '../lib/import.mjs';
 const securityHeaders = {
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
 };
 
@@ -26,6 +26,32 @@ const token = () => {
   return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
 };
 
+const AUTH_MAX_AGE = 60 * 60 * 24 * 90;
+const RESET_MAX_AGE = 60 * 30;
+const encoder = new TextEncoder();
+const toHex = bytes => [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+const randomHex = bytes => {
+  const value = new Uint8Array(bytes);
+  crypto.getRandomValues(value);
+  return toHex(value);
+};
+const sha256 = async value => toHex(await crypto.subtle.digest('SHA-256', encoder.encode(value)));
+const secureEqual = (left, right) => {
+  if (typeof left !== 'string' || typeof right !== 'string' || left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
+};
+const normalizeEmail = value => String(value || '').trim().toLowerCase();
+const validateEmail = email => {
+  requireValue(email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email), 'Introduce un correo electrónico válido.');
+};
+const validatePasswordProof = (salt, proof) => {
+  requireValue(/^[a-f0-9]{32}$/.test(salt || '') && /^[a-f0-9]{64}$/.test(proof || ''), 'No se ha podido procesar la contraseña. Recarga la página e inténtalo de nuevo.');
+};
+const escapeHtml = value =>
+  String(value).replace(/[&<>"']/g, character => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[character]));
+
 const parseCookies = request =>
   Object.fromEntries(
     (request.headers.get('Cookie') || '')
@@ -45,10 +71,12 @@ const apiResponse = (data, status = 200, headers = {}) => {
   return new Response(body, {status, headers: responseHeaders});
 };
 
-const addCookie = (response, name, value, secure = true) => {
-  response.headers.append('Set-Cookie', `${name}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000${secure ? '; Secure' : ''}`);
+const addCookie = (response, name, value, secure = true, maxAge = 31536000) => {
+  response.headers.append('Set-Cookie', `${name}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? '; Secure' : ''}`);
   return response;
 };
+
+const clearCookie = (response, name, secure = true) => addCookie(response, name, '', secure, 0);
 
 const first = async (db, sql, ...params) =>
   db
@@ -67,6 +95,85 @@ const run = async (db, sql, ...params) =>
     .prepare(sql)
     .bind(...params)
     .run();
+
+async function authenticatedTeacher(db, cookies, now) {
+  const rawToken = cookies.pulso_auth;
+  if (!/^[a-f0-9]{64}$/.test(rawToken || '')) return null;
+  const tokenHash = await sha256(rawToken);
+  const teacher = await first(
+    db,
+    'SELECT t.id,t.email,ts.expires FROM teacher_sessions ts JOIN teachers t ON t.id=ts.teacher_id WHERE ts.token_hash=?',
+    tokenHash
+  );
+  if (!teacher) return null;
+  if (Number(teacher.expires) <= now) {
+    await run(db, 'DELETE FROM teacher_sessions WHERE token_hash=?', tokenHash);
+    return null;
+  }
+  return {id: teacher.id, email: teacher.email, tokenHash};
+}
+
+async function migrateLegacySessions(db, legacyOwner, teacherId) {
+  if (/^[a-f0-9]{48}$/.test(legacyOwner || '') && legacyOwner !== teacherId) {
+    await run(db, 'UPDATE sessions SET owner=? WHERE owner=?', teacherId, legacyOwner);
+  }
+}
+
+async function teacherPayload(db, teacher, now) {
+  return {
+    authenticated: true,
+    email: teacher.email,
+    sessions: await all(db, 'SELECT code,title,created,ended FROM sessions WHERE owner=? ORDER BY created DESC', teacher.id),
+    serverNow: now
+  };
+}
+
+async function createTeacherSession(db, teacherId, now) {
+  const rawToken = randomHex(32);
+  const tokenHash = await sha256(rawToken);
+  await run(db, 'INSERT INTO teacher_sessions(token_hash,teacher_id,created,expires) VALUES(?,?,?,?)', tokenHash, teacherId, now, now + AUTH_MAX_AGE * 1000);
+  return rawToken;
+}
+
+async function failedLogin(db, email, now) {
+  const previous = await first(db, 'SELECT failures,updated FROM auth_attempts WHERE email=?', email);
+  const recent = previous && now - Number(previous.updated) < 15 * 60 * 1000;
+  const failures = recent ? Number(previous.failures) + 1 : 1;
+  const blockedUntil = failures >= 5 ? now + 15 * 60 * 1000 : 0;
+  await run(
+    db,
+    'INSERT INTO auth_attempts(email,failures,blocked_until,updated) VALUES(?,?,?,?) ON CONFLICT(email) DO UPDATE SET failures=excluded.failures,blocked_until=excluded.blocked_until,updated=excluded.updated',
+    email,
+    failures,
+    blockedUntil,
+    now
+  );
+}
+
+async function sendPasswordReset(env, email, link, tokenHash) {
+  requireValue(env.RESEND_API_KEY, 'La recuperación por correo todavía no está configurada. Añade RESEND_API_KEY en Cloudflare.', 503);
+  const from = env.MAIL_FROM || 'Pulso Aula <onboarding@resend.dev>';
+  const safeLink = escapeHtml(link);
+  const response = await (env.EMAIL_FETCH || fetch)('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `password-reset/${tokenHash}`
+    },
+    body: JSON.stringify({
+      from,
+      to: [email],
+      subject: 'Restablece tu contraseña de Pulso Aula',
+      text: `Has solicitado cambiar tu contraseña de Pulso Aula. Abre este enlace durante los próximos 30 minutos: ${link}\n\nSi no lo has solicitado, puedes ignorar este mensaje.`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#20202a"><h1 style="font-size:24px">Restablece tu contraseña</h1><p>Has solicitado cambiar tu contraseña de Pulso Aula.</p><p><a href="${safeLink}" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#6254d9;color:white;text-decoration:none;font-weight:bold">Crear una contraseña nueva</a></p><p>El enlace caduca en 30 minutos y solo puede utilizarse una vez.</p><p style="color:#6b6b76;font-size:13px">Si no lo has solicitado, puedes ignorar este mensaje.</p></div>`
+    })
+  });
+  if (!response.ok) {
+    console.error(`Resend rechazó el correo de recuperación (${response.status}).`);
+    throw new Problem('No se ha podido enviar el correo de recuperación. Revisa la configuración de correo e inténtalo de nuevo.', 503);
+  }
+}
 
 function validateQuestion(question) {
   requireValue(question && typeof question.title === 'string' && question.title.trim().length > 0 && question.title.length <= 2000, 'Escribe una pregunta (máximo 2000 caracteres).');
@@ -198,7 +305,6 @@ async function handleApi(request, env) {
   const url = new URL(request.url);
   const now = Date.now();
   const cookies = parseCookies(request);
-  let owner = cookies.pulso_teacher;
   const secure = url.protocol === 'https:';
 
   if (request.method === 'POST') {
@@ -206,20 +312,137 @@ async function handleApi(request, env) {
     if (origin) requireValue(new URL(origin).origin === url.origin, 'Origen no permitido.', 403);
   }
   const body = request.method === 'POST' ? await parseBody(request) : {};
+  const teacher = await authenticatedTeacher(env.DB, cookies, now);
+  const owner = teacher?.id || null;
+
+  if (url.pathname === '/api/auth/salt' && request.method === 'GET') {
+    const email = normalizeEmail(url.searchParams.get('email'));
+    validateEmail(email);
+    const account = await first(env.DB, 'SELECT password_salt FROM teachers WHERE email=?', email);
+    const fallback = (await sha256(`pulso-aula:${email}`)).slice(0, 32);
+    return apiResponse({salt: account?.password_salt || fallback, serverNow: now});
+  }
+
+  if (url.pathname === '/api/auth/register' && request.method === 'POST') {
+    const email = normalizeEmail(body.email);
+    const salt = String(body.salt || '');
+    const proof = String(body.proof || '');
+    validateEmail(email);
+    validatePasswordProof(salt, proof);
+    requireValue(!(await first(env.DB, 'SELECT id FROM teachers WHERE email=?', email)), 'Ya existe una cuenta con ese correo. Inicia sesión.', 409);
+    const teacherId = token();
+    const hash = await sha256(proof);
+    const rawToken = randomHex(32);
+    const tokenHash = await sha256(rawToken);
+    const statements = [
+      env.DB.prepare('INSERT INTO teachers(id,email,password_salt,password_hash,created) VALUES(?,?,?,?,?)').bind(teacherId, email, salt, hash, now),
+      env.DB.prepare('INSERT INTO teacher_sessions(token_hash,teacher_id,created,expires) VALUES(?,?,?,?)').bind(tokenHash, teacherId, now, now + AUTH_MAX_AGE * 1000)
+    ];
+    if (/^[a-f0-9]{48}$/.test(cookies.pulso_teacher || '')) {
+      statements.push(env.DB.prepare('UPDATE sessions SET owner=? WHERE owner=?').bind(teacherId, cookies.pulso_teacher));
+    }
+    try {
+      await env.DB.batch(statements);
+    } catch (error) {
+      if (String(error.message).toLowerCase().includes('unique')) throw new Problem('Ya existe una cuenta con ese correo. Inicia sesión.', 409);
+      throw error;
+    }
+    const response = apiResponse(await teacherPayload(env.DB, {id: teacherId, email}, now), 201);
+    return addCookie(response, 'pulso_auth', rawToken, secure, AUTH_MAX_AGE);
+  }
+
+  if (url.pathname === '/api/auth/login' && request.method === 'POST') {
+    const email = normalizeEmail(body.email);
+    const proof = String(body.proof || '');
+    validateEmail(email);
+    requireValue(/^[a-f0-9]{64}$/.test(proof), 'No se ha podido procesar la contraseña. Recarga la página e inténtalo de nuevo.');
+    const attempt = await first(env.DB, 'SELECT blocked_until FROM auth_attempts WHERE email=?', email);
+    requireValue(!attempt || Number(attempt.blocked_until) <= now, 'Demasiados intentos. Espera 15 minutos antes de volver a probar.', 429);
+    const account = await first(env.DB, 'SELECT * FROM teachers WHERE email=?', email);
+    const hash = await sha256(proof);
+    if (!account || !secureEqual(hash, account.password_hash)) {
+      await failedLogin(env.DB, email, now);
+      throw new Problem('Correo o contraseña incorrectos.', 401);
+    }
+    await run(env.DB, 'DELETE FROM auth_attempts WHERE email=?', email);
+    await migrateLegacySessions(env.DB, cookies.pulso_teacher, account.id);
+    const rawToken = await createTeacherSession(env.DB, account.id, now);
+    const response = apiResponse(await teacherPayload(env.DB, account, now));
+    return addCookie(response, 'pulso_auth', rawToken, secure, AUTH_MAX_AGE);
+  }
+
+  if (url.pathname === '/api/auth/password/request' && request.method === 'POST') {
+    const email = normalizeEmail(body.email);
+    validateEmail(email);
+    requireValue(env.RESEND_API_KEY, 'La recuperación por correo todavía no está configurada. Añade RESEND_API_KEY en Cloudflare.', 503);
+    await run(env.DB, 'DELETE FROM password_reset_tokens WHERE expires<=?', now);
+    const account = await first(env.DB, 'SELECT id,email FROM teachers WHERE email=?', email);
+    if (account) {
+      const recent = await first(env.DB, 'SELECT created FROM password_reset_tokens WHERE teacher_id=? ORDER BY created DESC LIMIT 1', account.id);
+      if (!recent || now - Number(recent.created) >= 60_000) {
+        const rawResetToken = randomHex(32);
+        const tokenHash = await sha256(rawResetToken);
+        await run(env.DB, 'DELETE FROM password_reset_tokens WHERE teacher_id=?', account.id);
+        await run(env.DB, 'INSERT INTO password_reset_tokens(token_hash,teacher_id,created,expires) VALUES(?,?,?,?)', tokenHash, account.id, now, now + RESET_MAX_AGE * 1000);
+        const resetOrigin = new URL(env.APP_ORIGIN || url.origin).origin;
+        const resetLink = `${resetOrigin.replace(/\/$/, '')}/?reset=${rawResetToken}`;
+        try {
+          await sendPasswordReset(env, account.email, resetLink, tokenHash);
+        } catch (error) {
+          await run(env.DB, 'DELETE FROM password_reset_tokens WHERE token_hash=?', tokenHash);
+          console.error(`No se pudo entregar el correo de recuperación: ${error.message}`);
+        }
+      }
+    }
+    return apiResponse({message: 'Si existe una cuenta con ese correo, recibirás un enlace válido durante 30 minutos.', serverNow: now});
+  }
+
+  if (url.pathname === '/api/auth/password/reset' && request.method === 'POST') {
+    const rawResetToken = String(body.token || '');
+    const salt = String(body.salt || '');
+    const proof = String(body.proof || '');
+    requireValue(/^[a-f0-9]{64}$/.test(rawResetToken), 'El enlace de recuperación no es válido o ha caducado.', 400);
+    validatePasswordProof(salt, proof);
+    const tokenHash = await sha256(rawResetToken);
+    const reset = await first(
+      env.DB,
+      'SELECT pr.teacher_id,t.email FROM password_reset_tokens pr JOIN teachers t ON t.id=pr.teacher_id WHERE pr.token_hash=? AND pr.expires>?',
+      tokenHash,
+      now
+    );
+    requireValue(reset, 'El enlace de recuperación no es válido o ha caducado.', 400);
+    const passwordHash = await sha256(proof);
+    const rawToken = randomHex(32);
+    const sessionHash = await sha256(rawToken);
+    await env.DB.batch([
+      env.DB.prepare('UPDATE teachers SET password_salt=?,password_hash=? WHERE id=?').bind(salt, passwordHash, reset.teacher_id),
+      env.DB.prepare('DELETE FROM teacher_sessions WHERE teacher_id=?').bind(reset.teacher_id),
+      env.DB.prepare('DELETE FROM password_reset_tokens WHERE teacher_id=?').bind(reset.teacher_id),
+      env.DB.prepare('DELETE FROM auth_attempts WHERE email=?').bind(reset.email),
+      env.DB.prepare('INSERT INTO teacher_sessions(token_hash,teacher_id,created,expires) VALUES(?,?,?,?)').bind(sessionHash, reset.teacher_id, now, now + AUTH_MAX_AGE * 1000)
+    ]);
+    const response = apiResponse(await teacherPayload(env.DB, {id: reset.teacher_id, email: reset.email}, now));
+    return addCookie(response, 'pulso_auth', rawToken, secure, AUTH_MAX_AGE);
+  }
+
+  if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
+    if (teacher) await run(env.DB, 'DELETE FROM teacher_sessions WHERE token_hash=?', teacher.tokenHash);
+    return clearCookie(apiResponse({authenticated: false, sessions: [], serverNow: now}), 'pulso_auth', secure);
+  }
 
   if (url.pathname === '/api/bootstrap' && request.method === 'GET') {
-    let fresh = false;
-    if (!owner || !/^[a-f0-9]{48}$/.test(owner)) {
-      owner = token();
-      fresh = true;
+    if (!teacher) {
+      const legacySessions = /^[a-f0-9]{48}$/.test(cookies.pulso_teacher || '')
+        ? Number((await first(env.DB, 'SELECT count(*) AS n FROM sessions WHERE owner=?', cookies.pulso_teacher)).n) > 0
+        : false;
+      return apiResponse({authenticated: false, sessions: [], legacySessions, serverNow: now});
     }
-    const sessions = await all(env.DB, 'SELECT code,title,created,ended FROM sessions WHERE owner=? ORDER BY created DESC', owner);
-    const response = apiResponse({sessions, serverNow: now});
-    return fresh ? addCookie(response, 'pulso_teacher', owner, secure) : response;
+    await migrateLegacySessions(env.DB, cookies.pulso_teacher, teacher.id);
+    return apiResponse(await teacherPayload(env.DB, teacher, now));
   }
 
   if (url.pathname === '/api/sessions' && request.method === 'POST') {
-    requireValue(owner, 'Recarga la página para crear una sesión.', 401);
+    requireValue(teacher, 'Inicia sesión para crear una encuesta.', 401);
     const title = String(body.title || '').trim();
     requireValue(title && title.length <= 120, 'Escribe un título de hasta 120 caracteres.');
     let code;
@@ -236,6 +459,7 @@ async function handleApi(request, env) {
   }
 
   if (url.pathname === '/api/import' && request.method === 'POST') {
+    requireValue(teacher, 'Inicia sesión para importar preguntas.', 401);
     try {
       const sheets = body.file ? readWorkbook(Buffer.from(body.file, 'base64')) : [parseTable(String(body.text || ''))];
       let parsed;
@@ -322,6 +546,7 @@ async function handleApi(request, env) {
     return apiResponse({saved: true});
   }
 
+  requireValue(teacher, 'Inicia sesión como profesor para continuar.', 401);
   const currentSession = await owned(env.DB, code, owner, now);
 
   if (action === 'duplicate' && request.method === 'POST') {

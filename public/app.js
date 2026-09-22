@@ -19,6 +19,7 @@ let role =
         ? "display"
         : "teacher",
   sessions = [],
+  authState = { authenticated: false, email: null, legacySessions: false },
   current = null,
   selected = null,
   stage = null,
@@ -27,6 +28,9 @@ let role =
   serverOffset = 0,
   signature = "",
   joinCode = new URLSearchParams(location.search).get("codigo") || "",
+  resetToken = new URLSearchParams(location.search).get("reset") || "",
+  authView = resetToken ? "reset" : "default",
+  resetRequested = false,
   timer,
   pollTimer;
 const icons = {
@@ -78,14 +82,60 @@ async function api(url, body) {
     serverOffset = data.serverNow - (started + Date.now()) / 2;
   return data;
 }
+const passwordEncoder = new TextEncoder();
+const passwordHex = (bytes) =>
+  [...new Uint8Array(bytes)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+const passwordSalt = () => {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return passwordHex(bytes);
+};
+const saltBytes = (salt) =>
+  new Uint8Array(salt.match(/.{2}/g).map((value) => Number.parseInt(value, 16)));
+async function derivePassword(password, salt) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    passwordEncoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  return passwordHex(
+    await crypto.subtle.deriveBits(
+      { name: "PBKDF2", hash: "SHA-256", salt: saltBytes(salt), iterations: 210000 },
+      key,
+      256,
+    ),
+  );
+}
 const endpoint = (a) => `/api/sessions/${current.code}/${a}`;
+function applyBootstrap(data) {
+  authState = {
+    authenticated: Boolean(data.authenticated),
+    email: data.email || null,
+    legacySessions: Boolean(data.legacySessions),
+  };
+  sessions = data.sessions || [];
+  if (!authState.authenticated) current = null;
+}
 function header() {
   if (role === "display")
     return `<header class="display-header"><span class="brand"><img src="/favicon.svg" alt="">pulso<span>AULA</span></span><span class="header-note">Pantalla de proyección · ${current?.teacher ? "Controles del profesor" : "Solo lectura"}</span></header>`;
-  return `<header><a class="brand" href="/" aria-label="Pulso, inicio"><img src="/favicon.svg" alt="">pulso<span>AULA</span></a><nav aria-label="Vista"><button data-action="teacher" class="${role === "teacher" ? "active" : ""}">Profesor</button><button data-action="student" class="${role === "student" ? "active" : ""}">Alumno</button></nav><span class="header-note">Cada respuesta cuenta.</span></header>`;
+  if (role === "student")
+    return `<header><span class="brand"><img src="/favicon.svg" alt="">pulso<span>AULA</span></span><span class="header-note">Vista del alumno · Cada respuesta cuenta.</span></header>`;
+  return `<header><a class="brand" href="/" aria-label="Pulso, inicio"><img src="/favicon.svg" alt="">pulso<span>AULA</span></a><nav aria-label="Vista"><button data-action="student">Entrar como alumno</button></nav>${authState.authenticated ? `<div class="teacher-account"><span>${esc(authState.email)}</span>${button("Cerrar sesión", "logout", "text")}</div>` : '<span class="header-note">Acceso del profesor</span>'}</header>`;
+}
+function authPage() {
+  if (authView === "reset")
+    return `<main class="auth-page"><div class="auth-heading"><span class="eyebrow">RECUPERACIÓN DE CONTRASEÑA</span><h1>Crea una contraseña nueva.</h1><p>El enlace solo puede utilizarse una vez y caduca 30 minutos después de solicitarlo.</p></div><div class="auth-grid single"><form id="reset-password-form" class="panel auth-card auth-card-center"><h2>Nueva contraseña</h2><label>Contraseña nueva<input name="password" type="password" minlength="10" maxlength="128" required autocomplete="new-password"></label><label>Repite la contraseña<input name="confirm" type="password" minlength="10" maxlength="128" required autocomplete="new-password"></label><p class="hint">Utiliza al menos 10 caracteres.</p><button class="btn primary full" type="submit">Guardar contraseña y entrar</button><button class="btn text full" type="button" data-action="auth-home">Volver al inicio</button></form></div></main>`;
+  if (authView === "forgot")
+    return `<main class="auth-page"><div class="auth-heading"><span class="eyebrow">RECUPERACIÓN DE CONTRASEÑA</span><h1>Recupera el acceso a tus encuestas.</h1><p>Escribe el correo con el que creaste tu cuenta.</p></div><div class="auth-grid single">${resetRequested ? `<section class="panel auth-card auth-card-center auth-message"><span class="tag green">SOLICITUD RECIBIDA</span><h2>Comprueba tu correo</h2><p>Si existe una cuenta con ese correo, recibirás un enlace válido durante 30 minutos. Revisa también la carpeta de correo no deseado.</p><button class="btn secondary full" type="button" data-action="auth-home">Volver a iniciar sesión</button></section>` : `<form id="password-request-form" class="panel auth-card auth-card-center"><h2>Enviar enlace</h2><label>Correo electrónico<input name="email" type="email" maxlength="254" required autocomplete="email" placeholder="nombre@universidad.es"></label><button class="btn primary full" type="submit">Enviar enlace de recuperación</button><button class="btn text full" type="button" data-action="auth-home">Volver a iniciar sesión</button></form>`}</div></main>`;
+  return `<main class="auth-page"><div class="auth-heading"><span class="eyebrow">ACCESO DOCENTE</span><h1>Tus encuestas, desde cualquier ordenador.</h1><p>Inicia sesión con tu correo y contraseña. Si todavía no tienes cuenta, créala desde el navegador donde conservas tus encuestas actuales.</p>${authState.legacySessions ? '<div class="legacy-notice"><strong>Hemos encontrado encuestas en este navegador.</strong><span>Al crear tu cuenta se vincularán automáticamente y podrás abrirlas desde otros ordenadores.</span></div>' : ""}</div><div class="auth-grid"><form id="login-form" class="panel auth-card"><span class="tag purple">YA TENGO CUENTA</span><h2>Iniciar sesión</h2><label>Correo electrónico<input name="email" type="email" maxlength="254" required autocomplete="email" placeholder="nombre@universidad.es"></label><label>Contraseña<input name="password" type="password" minlength="10" maxlength="128" required autocomplete="current-password"></label><button class="btn primary full" type="submit">Entrar</button><button class="btn text full" type="button" data-action="forgot-password">He olvidado mi contraseña</button></form><form id="register-form" class="panel auth-card"><span class="tag green">PRIMER ACCESO</span><h2>Crear cuenta</h2><label>Correo electrónico<input name="email" type="email" maxlength="254" required autocomplete="email" placeholder="nombre@universidad.es"></label><label>Contraseña<input name="password" type="password" minlength="10" maxlength="128" required autocomplete="new-password"></label><label>Repite la contraseña<input name="confirm" type="password" minlength="10" maxlength="128" required autocomplete="new-password"></label><p class="hint">Utiliza al menos 10 caracteres. La contraseña se protege en este dispositivo antes de enviarse y nunca se guarda como texto.</p><button class="btn secondary full" type="submit">Crear cuenta y vincular mis encuestas</button></form></div></main>`;
 }
 function home() {
-  return `<main class="home"><div class="eyebrow">TU ESPACIO DOCENTE</div><div class="title-row"><div><h1>Una clase. Todas las voces.</h1><p>Prepara tus preguntas y descubre qué ha entendido tu clase.</p></div>${button(icon("plus") + " Nueva sesión", "create", "primary")}</div><section class="welcome"><div><span class="tag light">DE LA PREGUNTA A LA CONVERSACIÓN</span><h2>Activa la curiosidad<br>de tu próxima clase.</h2><p>Crea una sesión, comparte el código y deja que respondan.<br>Los resultados aparecen cuando termina el tiempo.</p>${button("Crear una sesión " + icon("arrow"), "create", "white")}</div><div class="illustration" aria-hidden="true"><div class="mini-title">El aula tiene algo que decir.</div><div class="mini-bars"><i style="height:38%"></i><i style="height:66%"></i><i style="height:92%"></i><i style="height:48%"></i></div><div class="mini-labels"><span>A</span><span>B</span><span>C</span><span>D</span></div></div></section><div class="section-title"><h2>Mis sesiones</h2><span>${sessions.length} sesiones</span></div>${sessions.length ? `<div class="session-grid">${sessions.map((s) => `<article class="session-card"><button class="session-open" data-action="open" data-code="${s.code}"><div><span class="session-icon">${icon("chart")}</span><span class="tag ${s.ended ? "" : "purple"}">${s.ended ? "Finalizada" : "Preparada / en curso"}</span></div><h3>${esc(s.title)}</h3><p>Código ${s.code} <span>· ${new Date(s.created).toLocaleDateString("es-ES")}</span></p><div class="card-bottom">Abrir sesión ${icon("arrow")}</div></button><div class="session-card-actions"><button class="session-duplicate" data-action="duplicate" data-code="${s.code}" aria-label="Duplicar la sesión ${esc(s.title)}">Duplicar</button><button class="session-delete" data-action="ask-delete" data-code="${s.code}" aria-label="Eliminar la sesión ${esc(s.title)}">Eliminar</button></div></article>`).join("")}</div>` : `<section class="empty"><div class="empty-icon">${icon("chart")}</div><h3>Tu primera sesión empieza aquí</h3><p>Añade preguntas a mano o importa tu tabla de Excel.</p>${button("Crear sesión", "create", "primary")}</section>`}<p class="footnote">Tus sesiones se guardan en el servidor. Para volver a gestionarlas, usa este navegador y conserva sus cookies.</p></main>`;
+  return `<main class="home"><div class="eyebrow">TU ESPACIO DOCENTE</div><div class="title-row"><div><h1>Una clase. Todas las voces.</h1><p>Prepara tus preguntas y descubre qué ha entendido tu clase.</p></div>${button(icon("plus") + " Nueva sesión", "create", "primary")}</div><section class="welcome"><div><span class="tag light">DE LA PREGUNTA A LA CONVERSACIÓN</span><h2>Activa la curiosidad<br>de tu próxima clase.</h2><p>Crea una sesión, comparte el código y deja que respondan.<br>Los resultados aparecen cuando termina el tiempo.</p>${button("Crear una sesión " + icon("arrow"), "create", "white")}</div><div class="illustration" aria-hidden="true"><div class="mini-title">El aula tiene algo que decir.</div><div class="mini-bars"><i style="height:38%"></i><i style="height:66%"></i><i style="height:92%"></i><i style="height:48%"></i></div><div class="mini-labels"><span>A</span><span>B</span><span>C</span><span>D</span></div></div></section><div class="section-title"><h2>Mis sesiones</h2><span>${sessions.length} sesiones</span></div>${sessions.length ? `<div class="session-grid">${sessions.map((s) => `<article class="session-card"><button class="session-open" data-action="open" data-code="${s.code}"><div><span class="session-icon">${icon("chart")}</span><span class="tag ${s.ended ? "" : "purple"}">${s.ended ? "Finalizada" : "Preparada / en curso"}</span></div><h3>${esc(s.title)}</h3><p>Código ${s.code} <span>· ${new Date(s.created).toLocaleDateString("es-ES")}</span></p><div class="card-bottom">Abrir sesión ${icon("arrow")}</div></button><div class="session-card-actions"><button class="session-duplicate" data-action="duplicate" data-code="${s.code}" aria-label="Duplicar la sesión ${esc(s.title)}">Duplicar</button><button class="session-delete" data-action="ask-delete" data-code="${s.code}" aria-label="Eliminar la sesión ${esc(s.title)}">Eliminar</button></div></article>`).join("")}</div>` : `<section class="empty"><div class="empty-icon">${icon("chart")}</div><h3>Tu primera sesión empieza aquí</h3><p>Añade preguntas a mano o importa tu tabla de Excel.</p>${button("Crear sesión", "create", "primary")}</section>`}<p class="footnote">Tus encuestas están vinculadas a <strong>${esc(authState.email)}</strong> y aparecerán al iniciar sesión desde cualquier ordenador.</p></main>`;
 }
 function join() {
   return `<main class="join"><div class="join-heading"><span class="eyebrow">VAMOS A PARTICIPAR</span><h1>Tu voz está en clase.</h1><p>Introduce el código que comparte tu profesor.</p></div><form id="join-form" class="panel join-panel"><label>Código de sesión<input name="code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" required placeholder="000000" class="code-input" value="${esc(joinCode)}"></label><label>Tu nombre o identificador<input name="name" maxlength="60" required autocomplete="nickname" placeholder="Por ejemplo, Lucía M."></label><p class="hint">El profesor podrá ver tu nombre y tus respuestas.</p><button class="btn primary full" type="submit">Entrar en la sesión ${icon("arrow")}</button></form><p class="footnote">Una respuesta por pregunta. Los resultados se revelan al terminar.</p></main>`;
@@ -215,7 +265,9 @@ function render() {
           ? teacher()
           : student()
         : role === "teacher"
-          ? home()
+          ? resetToken || !authState.authenticated
+            ? authPage()
+            : home()
           : join();
   $("#app").innerHTML = header() + content;
   if (focus) document.getElementById(focus)?.focus();
@@ -449,12 +501,22 @@ async function perform(action, el) {
       role = "teacher";
       current = null;
       history.replaceState({}, "", "/");
-      sessions = (await api("/api/bootstrap")).sessions;
+      applyBootstrap(await api("/api/bootstrap"));
       break;
     case "student":
       role = "student";
       current = null;
       history.replaceState({}, "", "/alumno");
+      break;
+    case "forgot-password":
+      authView = "forgot";
+      resetRequested = false;
+      break;
+    case "auth-home":
+      authView = "default";
+      resetRequested = false;
+      resetToken = "";
+      history.replaceState({}, "", "/");
       break;
     case "create":
       modal(
@@ -469,7 +531,7 @@ async function perform(action, el) {
       break;
     case "duplicate": {
       const copy = await api(`/api/sessions/${el.dataset.code}/duplicate`, {});
-      sessions = (await api("/api/bootstrap")).sessions;
+      applyBootstrap(await api("/api/bootstrap"));
       notify(`Sesión duplicada: ${copy.title}`);
       break;
     }
@@ -484,12 +546,17 @@ async function perform(action, el) {
     case "confirm-delete":
       await api(`/api/sessions/${el.dataset.code}/delete`, {});
       $("#modal").close();
-      sessions = (await api("/api/bootstrap")).sessions;
+      applyBootstrap(await api("/api/bootstrap"));
       notify("Sesión eliminada");
       break;
     case "home":
       current = null;
-      sessions = (await api("/api/bootstrap")).sessions;
+      applyBootstrap(await api("/api/bootstrap"));
+      break;
+    case "logout":
+      applyBootstrap(await api("/api/auth/logout", {}));
+      history.replaceState({}, "", "/");
+      notify("Sesión cerrada");
       break;
     case "select":
       selected = el.dataset.id;
@@ -589,6 +656,53 @@ document.addEventListener("submit", async (e) => {
   if (submit) submit.disabled = true;
   const d = new FormData(form);
   try {
+    if (form.id === "password-request-form") {
+      await api("/api/auth/password/request", { email: d.get("email") });
+      resetRequested = true;
+      notify("Solicitud recibida. Comprueba tu correo.");
+    }
+    if (form.id === "reset-password-form") {
+      if (d.get("password") !== d.get("confirm"))
+        throw Error("Las dos contraseñas no coinciden.");
+      const salt = passwordSalt();
+      applyBootstrap(
+        await api("/api/auth/password/reset", {
+          token: resetToken,
+          salt,
+          proof: await derivePassword(String(d.get("password")), salt),
+        }),
+      );
+      resetToken = "";
+      authView = "default";
+      history.replaceState({}, "", "/");
+      notify("Contraseña actualizada. Ya has iniciado sesión.");
+    }
+    if (form.id === "login-form") {
+      const email = String(d.get("email")).trim().toLowerCase();
+      const { salt } = await api(
+        `/api/auth/salt?email=${encodeURIComponent(email)}`,
+      );
+      applyBootstrap(
+        await api("/api/auth/login", {
+          email,
+          proof: await derivePassword(String(d.get("password")), salt),
+        }),
+      );
+      notify("Sesión iniciada");
+    }
+    if (form.id === "register-form") {
+      if (d.get("password") !== d.get("confirm"))
+        throw Error("Las dos contraseñas no coinciden.");
+      const salt = passwordSalt();
+      applyBootstrap(
+        await api("/api/auth/register", {
+          email: d.get("email"),
+          salt,
+          proof: await derivePassword(String(d.get("password")), salt),
+        }),
+      );
+      notify("Cuenta creada. Tus encuestas ya están vinculadas.");
+    }
     if (form.id === "create-form") {
       const { code } = await api("/api/sessions", { title: d.get("title") });
       current = await api(`/api/sessions/${code}`);
@@ -653,7 +767,7 @@ async function init() {
         current = await api(`/api/sessions/${joinCode}/display`);
         last = Date.now();
       }
-    } else sessions = (await api("/api/bootstrap")).sessions;
+    } else applyBootstrap(await api("/api/bootstrap"));
   } catch (e) {
     notify(e.message, true);
   }
